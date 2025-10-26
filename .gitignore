@@ -5,3 +5,5 @@ scripts.sh
 output/
 .ipynb_checkpoints
 initialize/
+spt_models/
+wandb/
