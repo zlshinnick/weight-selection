@@ -745,6 +745,7 @@ def build_model(args):
             drop_path_rate=args.drop_path,
             ls_init_value=args.layer_scale_init_value,
             head_init_scale=args.head_init_scale,
+            in_chans=getattr(args, "in_chans", 3),
         )
     else:
         model = create_model(

@@ -19,6 +19,11 @@ from .data.dyck_shuffle.masking import (
     CloseOnlyMasking as ShuffleCloseOnlyMasking,
     RandomMasking as ShuffleRandomMasking,
 )
+from .data.ww.dataset import WwGrid
+from .data.ww.masking import (
+    CloseOnlyMasking as WwCloseOnlyMasking,
+    RandomMasking as WwRandomMasking,
+)
 from .train.logger import WandbLogger
 from .train.trainer import Trainer
 
@@ -46,9 +51,17 @@ def main():
     ap.add_argument(
         "--masking", type=str, default="close_only", choices=["close_only", "random"]
     )
+    ap.add_argument(
+        "--use-swin",
+        action="store_true",
+        help="Use Swin wrapper instead of ViT (ablation)",
+    )
     args = ap.parse_args()
 
     cfg = load_cfg(args.config)
+    # CLI override for ablation toggle
+    if getattr(args, "use_swin", False):
+        cfg.model.use_swin = True
     set_all_seeds(cfg.seed)
 
     # Save config to checkpoint directory
@@ -67,12 +80,21 @@ def main():
     model, mlm_head = build_model(cfg, tok, pos)
 
     # data + masking
-    if getattr(cfg.dataset, "source", "dyck") == "dyck_shuffle":
+    source = getattr(cfg.dataset, "source", "dyck")
+    if source == "dyck_shuffle":
         ds = DyckShuffleGrid(cfg)
         masking = (
             ShuffleCloseOnlyMasking(cfg)
             if args.masking == "close_only"
             else ShuffleRandomMasking(cfg)
+        )
+    elif source == "ww":
+        ds = WwGrid(cfg)
+        # For ww, "close_only" maps to the ww-specific masking policy
+        masking = (
+            WwCloseOnlyMasking(cfg)
+            if args.masking == "close_only"
+            else WwRandomMasking(cfg)
         )
     else:
         ds = DyckGrid(cfg)

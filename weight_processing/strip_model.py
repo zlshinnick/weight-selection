@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Convert and clean pretrain checkpoints from .pt to .pth format.
+Convert and clean pretrain checkpoints from .pt or .pth format.
 Removes MLM-specific weights and untrained components.
 """
 
@@ -15,11 +15,11 @@ import torch
 
 def convert_and_clean_checkpoint(input_path, output_path):
     """
-    Convert .pt checkpoint to clean .pth format.
+    Convert checkpoint (.pt or .pth) to clean .pth format.
 
     Steps:
-    1. Load the .pt checkpoint
-    2. Extract model_state (from symbolic_pretrain.py format)
+    1. Load the checkpoint
+    2. Extract model_state (handles 'model_state', 'model', 'state_dict', or raw state_dict)
     3. Strip wrapper prefixes (vit., tok., pos.)
     4. Remove untrained components (patch_embed, pos_embed, head)
     5. Save as clean .pth file
@@ -31,15 +31,34 @@ def convert_and_clean_checkpoint(input_path, output_path):
     print("  Loading checkpoint...")
     checkpoint = torch.load(input_path, map_location="cpu", weights_only=False)
 
-    print(f"  Checkpoint keys: {list(checkpoint.keys())}")
+    if hasattr(checkpoint, "keys"):
+        print(f"  Checkpoint keys: {list(checkpoint.keys())}")
+    else:
+        print(f"  Checkpoint type: {type(checkpoint)}")
 
     # Extract model state
-    if "model_state" in checkpoint:
-        model_state_dict = checkpoint["model_state"]
-    elif "model" in checkpoint:
-        model_state_dict = checkpoint["model"]
+    # Support multiple common layouts
+    if isinstance(checkpoint, dict):
+        if "model_state" in checkpoint:
+            model_state_dict = checkpoint["model_state"]
+        elif "model" in checkpoint:
+            model_state_dict = checkpoint["model"]
+        elif "state_dict" in checkpoint:
+            model_state_dict = checkpoint["state_dict"]
+        else:
+            # If dict maps param_name -> tensor, treat as raw state_dict
+            values = list(checkpoint.values())
+            if values and all(hasattr(v, "shape") for v in values):
+                model_state_dict = checkpoint
+            else:
+                raise ValueError(
+                    f"Unknown checkpoint format keys: {list(checkpoint.keys())}"
+                )
+    elif hasattr(checkpoint, "items"):
+        # OrderedDict-like raw state_dict
+        model_state_dict = checkpoint
     else:
-        raise ValueError(f"Unknown checkpoint format: {checkpoint.keys()}")
+        raise ValueError("Unsupported checkpoint object; expected dict or state_dict")
 
     print(f"  Original model keys: {len(model_state_dict)}")
 
@@ -47,41 +66,42 @@ def convert_and_clean_checkpoint(input_path, output_path):
     cleaned_state_dict = {}
     removed_keys = []
 
-    # Keys to remove (untrained or MLM-specific)
-    keys_to_skip = {
-        "patch_embed.proj.weight",
+    # Keys / prefixes to remove (untrained or MLM-specific)
+    # - Handle both ViT-B and XCiT naming: prefer prefix-based removal
+    skip_prefixes = (
+        "patch_embed.",  # image patch embedding (unused/untrained in symbolic pretrain)
+        "pos_embed.",  # backbone positional embed (unused/untrained)
+        "head.",  # classifier head (unused/untrained)
+    )
+    skip_exact = {
+        "pos_embed",  # some ViT variants store the whole tensor under this key
+        "cls_token",  # class token (unused in our XCiT path)
+        "tok.weight",  # MLM token embeddings (wrapper)
+        "pos.weight",  # MLM positional embeddings (wrapper)
+        "patch_embed.proj.weight",  # legacy exact names
         "patch_embed.proj.bias",
-        "pos_embed",
         "head.weight",
         "head.bias",
-        "tok.weight",  # MLM token embeddings
-        "pos.weight",  # MLM position embeddings
     }
 
     for key, value in model_state_dict.items():
-        # Skip MLM-specific wrapper keys
-        if key in ["tok.weight", "pos.weight"]:
+        # Skip MLM-specific wrapper keys (if present at top-level)
+        if key in ("tok.weight", "pos.weight"):
             removed_keys.append(f"{key} (MLM-specific)")
             continue
 
-        # Strip 'vit.' prefix from transformer weights
+        # Normalize by stripping 'vit.' prefix when present
         if key.startswith("vit."):
             new_key = key[4:]  # Remove 'vit.' prefix
+        else:
+            new_key = key
 
-            # Check if this is a key we want to skip
-            if new_key in keys_to_skip:
-                removed_keys.append(f"{key} -> {new_key} (untrained)")
-                continue
-
-            cleaned_state_dict[new_key] = value
-
-        # Skip untrained components
-        elif key in keys_to_skip:
-            removed_keys.append(f"{key} (untrained)")
+        # Decide to skip based on exact or prefix match
+        if new_key in skip_exact or any(new_key.startswith(p) for p in skip_prefixes):
+            removed_keys.append(f"{key} -> {new_key} (untrained)")
             continue
 
-        else:
-            cleaned_state_dict[key] = value
+        cleaned_state_dict[new_key] = value
 
     print(f"\n  Cleaned state dict: {len(cleaned_state_dict)} keys")
     print(f"  Removed {len(removed_keys)} keys:")
@@ -104,22 +124,38 @@ def convert_and_clean_checkpoint(input_path, output_path):
 
 
 def main():
-    # Directory containing new pretrain checkpoints
-    checkpoint_dir = Path(
-        "spt_models/dyck-mlm/v7_shuffled/close-only"
-    )
+    # Determine target (optional CLI arg: file or directory)
+    if len(sys.argv) > 1:
+        target = Path(sys.argv[1])
+        if target.is_file():
+            checkpoint_dir = target.parent
+            input_files = [target]
+        else:
+            checkpoint_dir = target
+            input_files = []
+    else:
+        # Default directory containing pretrain checkpoints
+        checkpoint_dir = Path("fractal-pt-models/v7/")
+        input_files = []
 
-    # Find all .pt files
-    pt_files = sorted(checkpoint_dir.glob("ckpt_step_*.pt"))
+    # Find .pt and .pth files
+    if not input_files:
+        pt_files = list(checkpoint_dir.glob("ckpt_step_*.pt"))
+        pth_files = [
+            p
+            for p in checkpoint_dir.glob("*.pth")
+            if not p.name.endswith("_no_embed.pth")
+        ]
+        input_files = sorted(pt_files + pth_files)
 
-    if not pt_files:
-        print(f"No checkpoint .pt files found in {checkpoint_dir}")
+    if not input_files:
+        print(f"No checkpoint .pt or .pth files found in {checkpoint_dir}")
         return
 
     print("=" * 80)
     print("CONVERTING AND CLEANING PRETRAIN CHECKPOINTS")
     print("=" * 80)
-    print(f"\nFound {len(pt_files)} checkpoint(s) to process")
+    print(f"\nFound {len(input_files)} checkpoint(s) to process")
     print("\nOperations:")
     print("  1. Extract model weights from .pt checkpoint")
     print("  2. Strip 'vit.' prefix from transformer weights")
@@ -129,17 +165,21 @@ def main():
 
     results = {}
     failures = []
-    for pt_file in pt_files:
-        # Create output filename (replace .pt with .pth, add _no_embed suffix)
-        base_name = pt_file.stem  # e.g., "ckpt_step_030000"
-        pth_file = checkpoint_dir / f"{base_name}_no_embed.pth"
+    for in_file in input_files:
+        # Create output filename (normalize to *_no_embed.pth; avoid double-suffix)
+        base_name = in_file.stem
+        if base_name.endswith("_no_embed"):
+            out_name = f"{base_name}_cleaned.pth"
+        else:
+            out_name = f"{base_name}_no_embed.pth"
+        pth_file = checkpoint_dir / out_name
 
         try:
-            num_keys, num_removed = convert_and_clean_checkpoint(pt_file, pth_file)
+            num_keys, num_removed = convert_and_clean_checkpoint(in_file, pth_file)
             results[pth_file.name] = (num_keys, num_removed)
         except Exception as e:
-            print(f"\n  ✗ Error processing {pt_file.name}: {e}\n")
-            failures.append((pt_file.name, str(e)))
+            print(f"\n  ✗ Error processing {in_file.name}: {e}\n")
+            failures.append((in_file.name, str(e)))
 
     # Summary
     print("\n" + "=" * 80)
@@ -165,7 +205,9 @@ def main():
         print("patch_embed, pos_embed, head, and MLM components removed.")
         print("\nReady for fine-tuning! Use the *_no_embed.pth files.")
     elif results:
-        print(f"\n⚠ {len(results)}/{len(pt_files)} checkpoints processed successfully.")
+        print(
+            f"\n⚠ {len(results)}/{len(input_files)} checkpoints processed successfully."
+        )
         print(f"Cleaned checkpoints saved in: {checkpoint_dir}")
     else:
         print("\n✗ All checkpoints failed to process. Please check the errors above.")

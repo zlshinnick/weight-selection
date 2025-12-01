@@ -10,6 +10,7 @@ class ModelConfig:
     num_classes: int = 0
     pretrained: bool = False
     embed_dim: int = 192
+    use_swin: bool = False
     drop_path: float = 0.0
     layer_scale_init_value: float = 1e-6
     head_init_scale: float = 1.0
@@ -43,13 +44,20 @@ class DyckConfig:
 
 
 @dataclass
+class WwConfig:
+    alphabet: int = 64
+    min_w_length: int = 3
+    max_w_length: int = 32
+
+
+@dataclass
 class DatasetConfig:
     n_samples: int = 20000
     num_workers: int = 4
     pin_memory: bool = True
     use_shuffled: bool = False
     batch_size: int = 256
-    source: Literal["dyck", "dyck_shuffle"] = "dyck"
+    source: Literal["dyck", "dyck_shuffle", "ww"] = "dyck"
 
 
 @dataclass
@@ -117,6 +125,7 @@ class RootConfig:
     grid: GridConfig = field(default_factory=GridConfig)
     vocab: VocabConfig = field(default_factory=VocabConfig)
     dyck: DyckConfig = field(default_factory=DyckConfig)
+    ww: WwConfig = field(default_factory=WwConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)

@@ -1,9 +1,9 @@
 import argparse
 import datetime
+import math
 import numpy as np
 import time
 import torch
-import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import json
 import os
@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 
 from timm.data.mixup import Mixup
-from timm.models import create_model
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from timm.utils import ModelEma
 from optim_factory import create_optimizer, LayerDecayValueAssigner
@@ -22,8 +21,8 @@ from engine import train_one_epoch, evaluate
 from utils import NativeScalerWithGradNormCount as NativeScaler
 import utils
 
-import models.convnext
-import models.vision_transformer
+import models.convnext  # noqa: F401  (registers convnext in timm)
+import models.vision_transformer  # noqa: F401  (registers vit_* in timm)
 
 
 def str2bool(v):
@@ -48,6 +47,13 @@ def get_args_parser():
     )
     parser.add_argument("--batch_size", default=64, type=int, help="Per GPU batch size")
     parser.add_argument("--epochs", default=300, type=int)
+    parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=-1,
+        help="Maximum optimizer steps to run. If >0, overrides epoch-based training.",
+    )
+    # Note: warmup is controlled via --warmup_steps below
     parser.add_argument(
         "--update_freq", default=1, type=int, help="gradient accumulation steps"
     )
@@ -491,7 +497,7 @@ def main(args):
                 args.initialize, map_location="cpu", check_hash=True
             )
         else:
-            checkpoint = torch.load(args.initialize, map_location="cpu", weights_only=False)
+            checkpoint = torch.load(args.initialize, map_location="cpu")
 
         print("Load initialization from %s" % args.initialize)
         checkpoint_model = None
@@ -573,11 +579,24 @@ def main(args):
 
     loss_scaler = NativeScaler()  # if args.use_amp is False, this won't be used
 
+    # Determine total steps target and effective epochs for schedulers
+    default_steps_total = args.epochs * max(1, num_training_steps_per_epoch)
+    steps_target = (
+        args.max_steps
+        if getattr(args, "max_steps", -1) and args.max_steps > 0
+        else default_steps_total
+    )
+    effective_epochs = (
+        args.epochs
+        if steps_target == default_steps_total
+        else max(1, math.ceil(steps_target / max(1, num_training_steps_per_epoch)))
+    )
+
     print("Use Cosine LR scheduler")
     lr_schedule_values = utils.cosine_scheduler(
         args.lr,
         args.min_lr,
-        args.epochs,
+        effective_epochs,
         num_training_steps_per_epoch,
         warmup_epochs=args.warmup_epochs,
         warmup_steps=args.warmup_steps,
@@ -588,7 +607,7 @@ def main(args):
     wd_schedule_values = utils.cosine_scheduler(
         args.weight_decay,
         args.weight_decay_end,
-        args.epochs,
+        effective_epochs,
         num_training_steps_per_epoch,
     )
     print(
@@ -616,7 +635,7 @@ def main(args):
     )
 
     if args.eval:
-        print(f"Eval only mode")
+        print("Eval only mode")
         test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp)
         print(
             f"Accuracy of the network on {len(dataset_val)} test images: {test_stats['acc1']:.5f}%"
@@ -627,15 +646,31 @@ def main(args):
     if args.model_ema and args.model_ema_eval:
         max_accuracy_ema = 0.0
 
-    print("Start training for %d epochs" % args.epochs)
+    if steps_target == default_steps_total:
+        print("Start training for %d epochs" % args.epochs)
+    else:
+        print(
+            "Start training for %d steps (effective epochs: %d)"
+            % (steps_target, effective_epochs)
+        )
     start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
+    for epoch in range(args.start_epoch, effective_epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
         if log_writer is not None:
             log_writer.set_step(epoch * num_training_steps_per_epoch * args.update_freq)
         if wandb_logger:
             wandb_logger.set_steps()
+
+        # Determine how many steps to run this epoch (cap by remaining steps when step-based)
+        epoch_start_step = epoch * num_training_steps_per_epoch
+        if epoch_start_step >= steps_target:
+            break
+        steps_this_epoch = min(
+            num_training_steps_per_epoch,
+            steps_target - epoch_start_step,
+        )
+
         train_stats = train_one_epoch(
             model,
             criterion,
@@ -649,15 +684,17 @@ def main(args):
             mixup_fn,
             log_writer=log_writer,
             wandb_logger=wandb_logger,
-            start_steps=epoch * num_training_steps_per_epoch,
+            start_steps=epoch_start_step,
             lr_schedule_values=lr_schedule_values,
             wd_schedule_values=wd_schedule_values,
-            num_training_steps_per_epoch=num_training_steps_per_epoch,
+            num_training_steps_per_epoch=steps_this_epoch,
             update_freq=args.update_freq,
             use_amp=args.use_amp,
         )
         if args.output_dir and args.save_ckpt:
-            if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
+            if (epoch + 1) % args.save_ckpt_freq == 0 or (
+                epoch + 1
+            ) == effective_epochs:
                 utils.save_model(
                     args=args,
                     model=model,
