@@ -25,6 +25,8 @@ import utils
 import models.convnext
 import models.vision_transformer
 
+from low_rank_utils import apply_weight_truncation_to_model
+
 
 def str2bool(v):
     """
@@ -296,6 +298,26 @@ def get_args_parser():
     )
     parser.add_argument("--model_prefix", default="", type=str)
 
+    # Weight truncation parameters (SVD-based low-rank approximation)
+    parser.add_argument(
+        "--weight_truncation_rank",
+        type=int,
+        default=None,
+        help="Apply SVD-based low-rank approximation to weights with this rank (None = disabled)",
+    )
+    parser.add_argument(
+        "--weight_truncation_attention_only",
+        type=str2bool,
+        default=False,
+        help="If True, only apply weight truncation to attention matrices (qkv, proj)",
+    )
+    parser.add_argument(
+        "--weight_truncation_mlp_only",
+        type=str2bool,
+        default=False,
+        help="If True, only apply weight truncation to MLP matrices (fc1, fc2)",
+    )
+
     # Dataset parameters
     parser.add_argument(
         "--data_path",
@@ -491,7 +513,9 @@ def main(args):
                 args.initialize, map_location="cpu", check_hash=True
             )
         else:
-            checkpoint = torch.load(args.initialize, map_location="cpu", weights_only=False)
+            checkpoint = torch.load(
+                args.initialize, map_location="cpu", weights_only=False
+            )
 
         print("Load initialization from %s" % args.initialize)
         checkpoint_model = None
@@ -511,6 +535,30 @@ def main(args):
                 print(f"Removing key {k} from pretrained checkpoint")
                 del checkpoint_model[k]
         utils.load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
+
+    # Apply weight truncation (SVD-based low-rank approximation) if requested
+    if args.weight_truncation_rank is not None:
+        if args.weight_truncation_attention_only and args.weight_truncation_mlp_only:
+            raise ValueError(
+                "Cannot set both --weight_truncation_attention_only and --weight_truncation_mlp_only to True"
+            )
+
+        print(f"\nApplying weight truncation (rank={args.weight_truncation_rank})...")
+        if args.weight_truncation_attention_only:
+            print("  -> Attention layers only (qkv, proj)")
+        elif args.weight_truncation_mlp_only:
+            print("  -> MLP layers only (fc1, fc2)")
+        else:
+            print("  -> Both attention and MLP layers")
+
+        apply_weight_truncation_to_model(
+            model,
+            rank=args.weight_truncation_rank,
+            attention_only=args.weight_truncation_attention_only,
+            mlp_only=args.weight_truncation_mlp_only,
+        )
+        print("Weight truncation complete!")
+
     model.to(device)
 
     model_ema = None

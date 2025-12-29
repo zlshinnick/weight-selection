@@ -8,7 +8,8 @@ from .cfg import load_cfg
 from .utils import set_all_seeds
 from .vocab import FrozenTokenEmbedding
 from .pos_embed import FrozenPositionalEmbedding
-from .model_factory import build_model
+from .model_factory import build_model, build_parallel_models
+from .apply_low_rank import apply_low_rank_factorization
 from .data.dyck.dataset import DyckGrid
 from .data.dyck.masking import (
     CloseOnlyMasking as DyckCloseOnlyMasking,
@@ -62,6 +63,9 @@ def main():
     # CLI override for ablation toggle
     if getattr(args, "use_swin", False):
         cfg.model.use_swin = True
+
+    # Read num_parallel_models from config
+    num_parallel_models = getattr(cfg.model, "num_parallel_models", 1)
     set_all_seeds(cfg.seed)
 
     # Save config to checkpoint directory
@@ -77,7 +81,78 @@ def main():
     pos = FrozenPositionalEmbedding(N, cfg.model.embed_dim)
 
     # model + head
-    model, mlm_head = build_model(cfg, tok, pos)
+    if num_parallel_models > 1:
+        print(f"\n[model] Building {num_parallel_models} parallel models...")
+        models, mlm_heads = build_parallel_models(cfg, tok, pos, num_parallel_models)
+        model = models  # Trainer will handle list of models
+        mlm_head = mlm_heads  # Trainer will handle list of heads
+
+        # Log parallel model details
+        print(f"[model] ✓ Created {len(models)} parallel models")
+        print(f"[model] Architecture: {cfg.model.name}")
+        print(f"[model] Embed dim: {cfg.model.embed_dim}")
+        print(
+            f"[model] Weight tying within models: {getattr(cfg.model, 'tie_weights', False)}"
+        )
+        print("[model] Weight tying across models: enabled (attention & MLP)")
+
+        # Calculate parameter counts
+        total_params = sum(p.numel() for m in models for p in m.parameters())
+        total_trainable = sum(
+            p.numel() for m in models for p in m.parameters() if p.requires_grad
+        )
+        mlm_params = sum(p.numel() for h in mlm_heads for p in h.parameters())
+        mlm_trainable = sum(
+            p.numel() for h in mlm_heads for p in h.parameters() if p.requires_grad
+        )
+
+        # Count unique parameters (accounting for weight tying)
+        seen_param_ids = set()
+        unique_params = 0
+        unique_trainable = 0
+        for m in models:
+            for p in m.parameters():
+                param_id = id(p)
+                if param_id not in seen_param_ids:
+                    seen_param_ids.add(param_id)
+                    unique_params += p.numel()
+                    if p.requires_grad:
+                        unique_trainable += p.numel()
+        for h in mlm_heads:
+            for p in h.parameters():
+                param_id = id(p)
+                if param_id not in seen_param_ids:
+                    seen_param_ids.add(param_id)
+                    unique_params += p.numel()
+                    if p.requires_grad:
+                        unique_trainable += p.numel()
+
+        print("[model] Parameter counts:")
+        print(f"  - Total params (all models): {total_params:,}")
+        print(f"  - Unique params (after tying): {unique_params:,}")
+        print(f"  - Trainable params (all models): {total_trainable:,}")
+        print(f"  - Unique trainable (after tying): {unique_trainable:,}")
+        print(f"  - MLM head params (all heads): {mlm_params:,}")
+        print(f"  - MLM head trainable: {mlm_trainable:,}")
+
+        # Show seeds used for each model
+        print(
+            f"[model] Model seeds: {[cfg.seed + i for i in range(num_parallel_models)]}"
+        )
+        print("[model] Models initialized and weights tied across models\n")
+    else:
+        model, mlm_head = build_model(cfg, tok, pos)
+        print(f"[model] Built single model: {cfg.model.name}")
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(
+            f"[model] Total params: {total_params:,}, Trainable: {trainable_params:,}\n"
+        )
+
+    # Apply low-rank factorization if requested
+    using_low_rank = getattr(cfg.model, "rank_attn", None) is not None or getattr(cfg.model, "rank_mlp", None) is not None
+    if using_low_rank:
+        apply_low_rank_factorization(model, cfg, total_params)
 
     # data + masking
     source = getattr(cfg.dataset, "source", "dyck")
@@ -109,7 +184,9 @@ def main():
     if cfg.wandb.enabled:
         try:
             logger = WandbLogger(cfg)
-            logger.watch(model, cfg.logging.print_freq)
+            # Watch first model if parallel, or single model
+            model_to_watch = model[0] if isinstance(model, list) else model
+            logger.watch(model_to_watch, cfg.logging.print_freq)
         except Exception as e:
             print(f"[wandb] failed to init: {e}")
 

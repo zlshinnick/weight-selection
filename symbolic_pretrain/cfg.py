@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Literal, Dict, Any
+from typing import List, Optional, Literal
 import yaml
 import os
 
@@ -10,6 +10,7 @@ class ModelConfig:
     num_classes: int = 0
     pretrained: bool = False
     embed_dim: int = 192
+    depth: Optional[int] = None  # Override model depth (number of transformer layers)
     use_swin: bool = False
     drop_path: float = 0.0
     layer_scale_init_value: float = 1e-6
@@ -19,6 +20,25 @@ class ModelConfig:
     mimetic_alpha: float = 0.4
     mimetic_beta: float = 0.4
     mimetic_dist: Literal["uniform", "normal"] = "uniform"
+    # Weight tying: if True, tie weights of layers 2 through n (first layer remains untied)
+    tie_weights: bool = False
+    # If tie_weights=True and tie_attention_mlp_only=True, only tie attention/MLP weights
+    # (norms remain independent). If False, tie all parameters including norms.
+    tie_attention_mlp_only: bool = False
+    # Custom weight tying groups. If specified, each inner list represents a group of layers
+    # that will be tied together (first layer in each group is the reference).
+    # Example: [[0], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [11]] means:
+    #   - Layer 0 is independent
+    #   - Layers 1-10 are tied (layer 1 is reference)
+    #   - Layer 11 is independent
+    # If None, uses default behavior: layer 0 untied, layer 1 reference, layers 2+ tied to layer 1
+    tie_weight_groups: Optional[List[List[int]]] = None
+    # Number of parallel models to train with different seeds. Attention and MLP weights (only!) will be tied across models.
+    num_parallel_models: int = 1
+    # Low-rank factorization: if rank_attn or rank_mlp is set, replace Linear layers with LowRankLinear. This means will train
+    # the A and B matrices throughout procedural warmup.
+    rank_attn: Optional[int] = None  # Rank for attention layers (qkv, proj)
+    rank_mlp: Optional[int] = None  # Rank for MLP layers (fc1, fc2)
 
 
 @dataclass
@@ -41,6 +61,7 @@ class DyckConfig:
     open_prob: float = 0.6
     min_pairs: int = 1
     max_depth: int = 16
+    bracket_alpha: Optional[float] = None
 
 
 @dataclass

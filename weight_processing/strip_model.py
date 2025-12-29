@@ -39,7 +39,18 @@ def convert_and_clean_checkpoint(input_path, output_path):
     # Extract model state
     # Support multiple common layouts
     if isinstance(checkpoint, dict):
-        if "model_state" in checkpoint:
+        # Handle parallel model checkpoints (model_states is a list)
+        if "model_states" in checkpoint:
+            model_states = checkpoint["model_states"]
+            if isinstance(model_states, list) and len(model_states) > 0:
+                # Use the first model as reference (all models share tied weights)
+                n_models = checkpoint.get("n_models", len(model_states))
+                print(f"  Parallel model checkpoint detected: {n_models} models")
+                print(f"  Using reference model (model[0]) - all models share tied weights")
+                model_state_dict = model_states[0]
+            else:
+                raise ValueError("model_states is not a valid list")
+        elif "model_state" in checkpoint:
             model_state_dict = checkpoint["model_state"]
         elif "model" in checkpoint:
             model_state_dict = checkpoint["model"]

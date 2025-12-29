@@ -737,23 +737,27 @@ def apply_mimetic_init(model, alpha=0.4, beta=0.4, dist="uniform"):
 
 
 def build_model(args):
+    # Build kwargs for create_model
+    model_kwargs = {
+        "pretrained": False,
+        "num_classes": args.nb_classes,
+        "drop_path_rate": args.drop_path,
+    }
+
+    # Add depth override if specified
+    if hasattr(args, "depth") and args.depth is not None:
+        model_kwargs["depth"] = args.depth
+
     if args.model.startswith("convnext"):
-        model = create_model(
-            args.model,
-            pretrained=False,
-            num_classes=args.nb_classes,
-            drop_path_rate=args.drop_path,
-            ls_init_value=args.layer_scale_init_value,
-            head_init_scale=args.head_init_scale,
-            in_chans=getattr(args, "in_chans", 3),
+        model_kwargs.update(
+            {
+                "ls_init_value": args.layer_scale_init_value,
+                "head_init_scale": args.head_init_scale,
+                "in_chans": getattr(args, "in_chans", 3),
+            }
         )
-    else:
-        model = create_model(
-            args.model,
-            pretrained=False,
-            num_classes=args.nb_classes,
-            drop_path_rate=args.drop_path,
-        )
+
+    model = create_model(args.model, **model_kwargs)
 
     # Apply mimetic initialization if requested
     if hasattr(args, "mimetic_init") and args.mimetic_init:
