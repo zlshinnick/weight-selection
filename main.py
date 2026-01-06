@@ -64,6 +64,12 @@ def get_args_parser():
     )
     parser.add_argument("--input_size", default=224, type=int, help="image input size")
     parser.add_argument(
+        "--depth",
+        default=None,
+        type=int,
+        help="Override model depth (number of transformer blocks). If None, uses model default.",
+    )
+    parser.add_argument(
         "--layer_scale_init_value",
         default=1e-6,
         type=float,
