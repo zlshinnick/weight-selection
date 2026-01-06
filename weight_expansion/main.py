@@ -44,6 +44,10 @@ from .validation import (
     assert_shapes,
     verify_full_expansion,
 )
+from .gpt2_convert import (
+    gpt2_to_vit_state_dict,
+    vit_to_gpt2_state_dict,
+)
 
 
 # Required config keys
@@ -56,6 +60,7 @@ def _expand_block_params(
     tgt_cfg: Dict[str, Any],
     tile_mode: str,
     scale_mode: str,
+    pad_mode: str,
 ) -> Dict[str, torch.Tensor]:
     """Expand all parameters for a single block.
 
@@ -63,8 +68,9 @@ def _expand_block_params(
         src_block_sd: Source block state dict (keys without block prefix).
         src_cfg: Source configuration.
         tgt_cfg: Target configuration.
-        tile_mode: Tiling mode for SVD expansion.
+        tile_mode: Tiling mode for SVD expansion (only used when pad_mode="tile").
         scale_mode: Scaling mode for SVD expansion.
+        pad_mode: Expansion strategy: "tile", "zeros", or "random".
 
     Returns:
         Expanded block state dict (keys without block prefix).
@@ -82,13 +88,13 @@ def _expand_block_params(
         # Determine parameter type and expand accordingly
         if component == "attn.qkv.weight":
             expanded[component] = expand_qkv_weight(
-                tensor, src_embed_dim, tgt_embed_dim, tile_mode, scale_mode
+                tensor, src_embed_dim, tgt_embed_dim, tile_mode, scale_mode, pad_mode
             )
         elif component == "attn.qkv.bias":
             expanded[component] = expand_qkv_bias(tensor, src_embed_dim, tgt_embed_dim)
         elif component == "attn.proj.weight":
             expanded[component] = expand_proj_weight(
-                tensor, src_embed_dim, tgt_embed_dim, tile_mode, scale_mode
+                tensor, src_embed_dim, tgt_embed_dim, tile_mode, scale_mode, pad_mode
             )
         elif component == "attn.proj.bias":
             expanded[component] = expand_bias(tensor, tgt_embed_dim)
@@ -101,6 +107,7 @@ def _expand_block_params(
                 tgt_mlp_dim,
                 tile_mode,
                 scale_mode,
+                pad_mode,
             )
         elif component == "mlp.fc1.bias":
             expanded[component] = expand_bias(tensor, tgt_mlp_dim)
@@ -113,6 +120,7 @@ def _expand_block_params(
                 tgt_mlp_dim,
                 tile_mode,
                 scale_mode,
+                pad_mode,
             )
         elif component == "mlp.fc2.bias":
             expanded[component] = expand_bias(tensor, tgt_embed_dim)
@@ -136,6 +144,7 @@ def expand_vit_state_dict(
     width_scheme: str = "svd_row_tile",
     tile_mode: str = "cyclic",
     scale_mode: str = "none",
+    pad_mode: str = "tile",
     validate: bool = True,
     verbose: bool = True,
 ) -> Dict[str, torch.Tensor]:
@@ -154,8 +163,9 @@ def expand_vit_state_dict(
         tgt_cfg: Target config with same keys.
         depth_scheme: "early-middle-late" (only supported scheme).
         width_scheme: "svd_row_tile" (only supported scheme).
-        tile_mode: "cyclic" or "repeat" for row tiling.
+        tile_mode: "cyclic" or "repeat" for row tiling (only used when pad_mode="tile").
         scale_mode: "fro" (rescale to match Frobenius norm) or "none".
+        pad_mode: Expansion strategy: "tile", "zeros", or "random".
         validate: If True, run shape validation after expansion.
         verbose: If True, print progress information.
 
@@ -203,7 +213,7 @@ def expand_vit_state_dict(
         print(f"Source: embed_dim={src_embed_dim}, depth={src_depth}")
         print(f"Target: embed_dim={tgt_embed_dim}, depth={tgt_depth}")
         print(
-            f"Width scheme: {width_scheme} (tile_mode={tile_mode}, scale_mode={scale_mode})"
+            f"Width scheme: {width_scheme} (tile_mode={tile_mode}, scale_mode={scale_mode}, pad_mode={pad_mode})"
         )
         print(f"Depth scheme: {depth_scheme}")
         print()
@@ -271,7 +281,7 @@ def expand_vit_state_dict(
                 raise ValueError(f"Source block {src_idx} not found in state dict")
 
             expanded_block = _expand_block_params(
-                src_block, src_cfg, tgt_cfg, tile_mode, scale_mode
+                src_block, src_cfg, tgt_cfg, tile_mode, scale_mode, pad_mode
             )
             expanded_block_cache[src_idx] = expanded_block
             if verbose:
@@ -328,6 +338,7 @@ def expand_and_save(
     width_scheme: str = "svd_row_tile",
     tile_mode: str = "cyclic",
     scale_mode: str = "none",
+    pad_mode: str = "tile",
     validate: bool = True,
     verify_function: bool = False,
     verbose: bool = True,
@@ -343,8 +354,9 @@ def expand_and_save(
         tgt_cfg: Target configuration.
         depth_scheme: Depth expansion scheme.
         width_scheme: Width expansion scheme.
-        tile_mode: Tiling mode.
+        tile_mode: Tiling mode (only used when pad_mode="tile").
         scale_mode: Scaling mode.
+        pad_mode: Expansion strategy: "tile", "zeros", or "random".
         validate: Run shape validation.
         verify_function: Run function preservation verification.
         verbose: Print progress.
@@ -374,6 +386,7 @@ def expand_and_save(
         width_scheme=width_scheme,
         tile_mode=tile_mode,
         scale_mode=scale_mode,
+        pad_mode=pad_mode,
         validate=validate,
         verbose=verbose,
     )
@@ -417,7 +430,7 @@ if __name__ == "__main__":
         description="Expand ViT weights from smaller to larger model"
     )
     parser.add_argument(
-        "src_checkpoint",
+        "--src_checkpoint",
         type=str,
         help="Path to source checkpoint",
     )
@@ -473,6 +486,13 @@ if __name__ == "__main__":
         help="Scaling mode (default: fro)",
     )
     parser.add_argument(
+        "--pad-mode",
+        type=str,
+        choices=["tile", "zeros", "random"],
+        default="tile",
+        help="Expansion strategy: tile (SVD + tiling), zeros (zero-pad factors), random (random-pad factors with GPT-2 init). Default: tile",
+    )
+    parser.add_argument(
         "--verify",
         action="store_true",
         help="Verify function preservation",
@@ -503,6 +523,7 @@ if __name__ == "__main__":
         tgt_cfg=tgt_cfg,
         tile_mode=args.tile_mode,
         scale_mode=args.scale_mode,
+        pad_mode=args.pad_mode,
         verify_function=args.verify,
         verbose=not args.quiet,
     )
